@@ -1,7 +1,7 @@
 {
   "name": "hazaa-prime-ai",
   "version": "1.0.0",
-  "description": "Fantasy Football Team Assistant Bot",
+  "description": "HazaaPrime AI bot for managing fantasy football teams, paid & free teams automation, live stats and motivation.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -9,8 +9,7 @@
   },
   "dependencies": {
     "telegraf": "^4.12.2",
-    "axios": "^1.6.0",
-    "node-cron": "^3.0.2",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.3.1",
+    "axios": "^1.7.2"
   }
 }
