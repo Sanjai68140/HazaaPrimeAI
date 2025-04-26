@@ -1,189 +1,132 @@
 import { Telegraf } from 'telegraf';
+import fs from 'fs';
+import path from 'path';
 import axios from 'axios';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
-import fs from 'fs';
-import path from 'path';
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const channelId = '@haazaprime'; // your main channel username
 
-const paidPosts = new Map(); // Track paid posts
-const openPosts = new Map(); // Track open posts
+const paidPosts = new Map(); // track paid posts
+const openPosts = new Map(); // track open posts
+const motivationImages = []; // skip if no images
 
-// Morning motivation images path
-const motivationImages = [
-  'images/motivation1.jpg',
-  'images/motivation2.jpg',
-  // Add more images if needed
-];
-
-// Random casual messages
-const casualTexts = [
-  "Stay tuned champs, more magic coming!",
-  "Dream big, play smart!",
-  "Hope you all are ready for today's games!",
-  "Let's win big today!",
-];
-
-// Listen to every new message
-bot.on('channel_post', async (ctx) => {
-  const text = ctx.channelPost.text || '';
-  const caption = ctx.channelPost.caption || '';
-  const content = text + caption;
-  const postId = ctx.channelPost.message_id;
-  const chatId = ctx.channelPost.chat.id;
-
-  const timeNow = Date.now();
-
-  // Detect paid post
-  if (content.includes('Rpy') || content.includes('Unlock')) {
-    console.log('Detected Paid Post');
-
-    paidPosts.set(postId, { time: timeNow, chatId });
-
-    motivatePaid(chatId, postId);
-    stopMotivationAfter(chatId, postId, 35); // Stop after 35min
-  }
-
-  // Detect open post
-  else if (content.includes('Open') || content.includes('Ready')) {
-    console.log('Detected Open Team Post');
-
-    openPosts.set(postId, { time: timeNow, chatId });
-
-    const matchName = extractMatchName(content);
-    if (matchName) {
-      await postMatchStatsAndLineups(chatId, matchName);
-    }
-  }
-});
-
-// Function to motivate users after paid post
-async function motivatePaid(chatId, postId) {
-  const interval = setInterval(async () => {
-    if (!paidPosts.has(postId)) {
-      clearInterval(interval);
-      return;
-    }
-    await bot.telegram.sendMessage(chatId, "Don't miss out! Unlock your winning team now!");
-  }, 5 * 60 * 1000); // Every 5 minutes
-}
-
-// Function to stop motivation after 35 min
-function stopMotivationAfter(chatId, postId, minutes) {
-  setTimeout(() => {
-    paidPosts.delete(postId);
-  }, minutes * 60 * 1000);
-}
-
-// Extract match name smartly
-function extractMatchName(content) {
-  const regex = /([A-Za-z\s]+vs[A-Za-z\s]+)/i;
-  const match = content.match(regex);
-  if (match) {
-    return match[1];
-  }
+// Function to identify paid or open
+function detectPostType(text) {
+  if (!text) return null;
+  if (text.includes('Rpy') || text.includes('rpy')) return 'paid';
+  if (text.includes('Ready') || text.includes('Open') || text.includes('open')) return 'open';
   return null;
 }
 
-// Fetch stats and lineups
-async function postMatchStatsAndLineups(chatId, matchName) {
+// Watch new posts
+bot.on('channel_post', async (ctx) => {
   try {
-    const today = new Date();
-    const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+    const post = ctx.channelPost;
+    const type = detectPostType(post.caption || post.text);
 
-    const response = await axios.get(`https://api-football-v1.p.rapidapi.com/v3/fixtures`, {
-      headers: {
-        'X-RapidAPI-Key': process.env.API_KEY,
-        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
-      },
-      params: { date: dateStr }
-    });
+    if (type === 'paid') {
+      paidPosts.set(post.message_id, { chatId: post.chat.id, postedAt: Date.now() });
+      await ctx.reply('Paid team posted. Users hurry up and grab your win ticket!');
+      motivatePaid(ctx, post.message_id);
+    } else if (type === 'open') {
+      openPosts.set(post.message_id, { chatId: post.chat.id, postedAt: Date.now() });
+      await ctx.reply('Open team shared! Let’s smash today’s match!');
+      fetchMatchStats(ctx);
+    }
+  } catch (error) {
+    console.error('Error detecting post type:', error.message);
+  }
+});
 
-    const fixtures = response.data.response;
-
-    const fixture = fixtures.find(f =>
-      `${f.teams.home.name} vs ${f.teams.away.name}`.toLowerCase().includes(matchName.toLowerCase())
-    );
-
-    if (!fixture) {
-      console.log('No matching fixture found');
+// Function: Motivate paid users every 5 minutes
+function motivatePaid(ctx, messageId) {
+  const interval = setInterval(async () => {
+    if (!paidPosts.has(messageId)) {
+      clearInterval(interval);
       return;
     }
 
-    const fixtureId = fixture.fixture.id;
-
-    const lineupResponse = await axios.get(`https://api-football-v1.p.rapidapi.com/v3/fixtures/lineups`, {
-      headers: {
-        'X-RapidAPI-Key': process.env.API_KEY,
-        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
-      },
-      params: { fixture: fixtureId }
-    });
-
-    if (!lineupResponse.data.response.length) {
-      console.log('No lineup yet available');
-      return; // No lineups, skip
+    const { postedAt } = paidPosts.get(messageId);
+    if (Date.now() - postedAt > 35 * 60 * 1000) { // after 35 mins stop
+      paidPosts.delete(messageId);
+      clearInterval(interval);
+      return;
     }
 
-    const statsResponse = await axios.get(`https://api-football-v1.p.rapidapi.com/v3/fixtures/statistics`, {
+    await ctx.telegram.sendMessage(channelId, "Don't miss it! Last chance to grab your premium team and maximize winnings!");
+  }, 5 * 60 * 1000);
+}
+
+// Function: Fetch match stats and lineups (for open posts)
+async function fetchMatchStats(ctx) {
+  try {
+    const response = await axios.get('https://v3.football.api-sports.io/fixtures?next=1', {
       headers: {
-        'X-RapidAPI-Key': process.env.API_KEY,
-        'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
-      },
-      params: { fixture: fixtureId }
+        'x-apisports-key': process.env.API_FOOTBALL_KEY
+      }
     });
 
-    const stats = statsResponse.data.response;
+    const match = response.data.response[0];
+    if (!match) return;
 
-    let message = `⚽ Lineups for ${matchName}:\n`;
+    const home = match.teams.home.name;
+    const away = match.teams.away.name;
+    const status = match.fixture.status.short;
 
-    lineupResponse.data.response.forEach(team => {
-      message += `\n${team.team.name}:\n`;
-      team.startXI.forEach(player => {
-        message += `- ${player.player.name}\n`;
-      });
-    });
-
-    if (stats.length > 0) {
-      message += `\n\n📊 Match Stats:\n`;
-      stats.forEach(teamStats => {
-        message += `\n${teamStats.team.name}:\n`;
-        teamStats.statistics.forEach(stat => {
-          message += `- ${stat.type}: ${stat.value}\n`;
-        });
-      });
+    if (status === 'NS') { // NS = Not Started
+      const message = `Today's Match Preview:\n\n${home} vs ${away}\n\nGet ready for an exciting game! Stay tuned!`;
+      await ctx.telegram.sendMessage(channelId, message);
+    } else {
+      console.log('Match already started, no preview sent.');
     }
-
-    await bot.telegram.sendMessage(chatId, message);
 
   } catch (error) {
-    console.error('Error fetching match stats/lineups:', error.message);
+    console.error('Error fetching match stats:', error.message);
   }
 }
 
-// Delete paid messages after deadline (Already handled above)
+// Cron Job: Delete paid post after match time
+cron.schedule('* * * * *', async () => {
+  const now = Date.now();
+  for (const [msgId, { chatId, postedAt }] of paidPosts) {
+    if (now - postedAt > 120 * 60 * 1000) { // 2 hours passed
+      try {
+        await bot.telegram.deleteMessage(chatId, msgId);
+        paidPosts.delete(msgId);
+        console.log(`Deleted paid post: ${msgId}`);
+      } catch (error) {
+        console.error('Error deleting paid post:', error.message);
+      }
+    }
+  }
+});
 
-// Morning 4:30 AM motivational message
+// Cron Job: Morning 4:30 AM wish
 cron.schedule('30 4 * * *', async () => {
-  const channels = Array.from(new Set([...paidPosts.values(), ...openPosts.values()])).map(x => x.chatId);
+  const chats = Array.from(new Set([...paidPosts.values(), ...openPosts.values()])).map(x => x.chatId);
 
-  for (const chatId of channels) {
-    const imgPath = path.resolve(motivationImages[Math.floor(Math.random() * motivationImages.length)]);
-    await bot.telegram.sendPhoto(chatId, { source: imgPath }, { caption: "Good Morning! New day, new chances to win!" });
+  for (const chatId of chats) {
+    try {
+      if (motivationImages.length > 0) {
+        const imgPath = path.resolve(motivationImages[Math.floor(Math.random() * motivationImages.length)]);
+        if (fs.existsSync(imgPath)) {
+          await bot.telegram.sendPhoto(chatId, { source: imgPath }, { caption: "Good Morning! New day, new chances to win!" });
+        } else {
+          await bot.telegram.sendMessage(chatId, "Good Morning! New day, new chances to win!");
+        }
+      } else {
+        await bot.telegram.sendMessage(chatId, "Good Morning! New day, new chances to win!");
+      }
+    } catch (error) {
+      console.error('Error sending morning message:', error.message);
+    }
   }
 });
 
-// Casual talks every 5 hours if no activity
-cron.schedule('0 */5 * * *', async () => {
-  const channels = Array.from(new Set([...paidPosts.values(), ...openPosts.values()])).map(x => x.chatId);
-
-  for (const chatId of channels) {
-    await bot.telegram.sendMessage(chatId, casualTexts[Math.floor(Math.random() * casualTexts.length)]);
-  }
-});
-
+// Start bot
 bot.launch();
-console.log('HazaaaprimeAI Bot is running...');
+console.log('HazaaPrimeAI Bot started!');
