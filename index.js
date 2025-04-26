@@ -6,114 +6,128 @@ import cron from 'node-cron';
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const MAIN_CHANNEL_ID = process.env.MAIN_CHANNEL_ID;
+const MOTIVATION_INTERVAL_MINUTES = parseInt(process.env.MOTIVATION_INTERVAL_MINUTES);
+const MORNING_MESSAGE_TIME = process.env.MORNING_MESSAGE_TIME;
+const TIMEZONE = process.env.TIMEZONE;
 
-const motivationMessages = [
-  "Stay strong! Today’s victory starts with belief!",
-  "Push beyond limits — success is waiting for you!",
-  "Every dream begins with a step — take it now!",
-  "Champions keep playing until they get it right!",
-  "Rise up and own your game today!",
-  "Opportunities are endless for those who hustle!",
-  "Success is earned, not given!",
-  "Stay focused, stay hungry, stay positive!"
+let paidMessageIds = [];
+let motivationIntervals = {};
+
+const motivationQuotes = [
+  "Believe in your team, believe in your dreams! ⚽🔥",
+  "Winning starts with the right team. Let's go! 💪",
+  "Hazaa Prime teams are pure magic. Make your move! ✨",
+  "Victory loves preparation. Team posted, grab it fast! ✅",
+  "Dream big, play bigger with HazaaPrime! ⚡",
 ];
 
-// To track active paid messages
-let activePaidMessages = {};
+const goodMorningMessages = [
+  "Good Morning Champions! Let's dominate today's matches! ⚽☀️",
+  "Wake up and win! New day, new opportunities! ⚡",
+  "Morning Vibes: Trust HazaaPrime for the best teams! ❤️",
+  "Rise & Shine! Game day starts now! ⏰⚽",
+];
 
-// Function to send a random motivational message
-async function sendMotivation(ctx, chatId) {
-  const message = `🔥 ${motivationMessages[Math.floor(Math.random() * motivationMessages.length)]}`;
-  await ctx.telegram.sendMessage(chatId, message);
-}
+// --- Morning Message Scheduler ---
+cron.schedule(`0 ${MORNING_MESSAGE_TIME.split(':')[1]} ${MORNING_MESSAGE_TIME.split(':')[0]} * * *`, async () => {
+  const message = goodMorningMessages[Math.floor(Math.random() * goodMorningMessages.length)];
+  await bot.telegram.sendMessage(MAIN_CHANNEL_ID, message);
+}, { timezone: TIMEZONE });
 
-// 4:30AM Morning Motivation
-cron.schedule('0 4 * * *', async () => {
-  try {
-    const message = `🌟 Good Morning Champions! Keep your dreams big and your efforts bigger! 🔥`;
-    await bot.telegram.sendMessage(process.env.CHANNEL_ID, message);
-  } catch (error) {
-    console.error('Error sending morning motivation:', error.message);
-  }
-}, {
-  timezone: process.env.TIMEZONE
-});
-
-// Monitor new posts
+// --- Watch Channel Posts ---
 bot.on('channel_post', async (ctx) => {
-  const message = ctx.channelPost.text || ctx.channelPost.caption || "";
+  const post = ctx.channelPost;
+  const text = post.text || post.caption || "";
 
-  const chatId = ctx.channelPost.chat.id;
-  const postId = ctx.channelPost.message_id;
-
-  // Paid Post Detection
-  if (message.includes('Rpy') || message.includes('rpy')) {
-    activePaidMessages[postId] = Date.now();
-
-    // Send motivation every 5 minutes for 35 minutes
-    let counter = 0;
-    const interval = setInterval(async () => {
-      counter += 5;
-      if (counter > 35) {
-        clearInterval(interval);
-        delete activePaidMessages[postId];
-      } else {
-        await sendMotivation(ctx, chatId);
-      }
-    }, 5 * 60 * 1000);
-  }
-
-  // Open Team Detection
-  if (message.toLowerCase().includes('ready') || message.toLowerCase().includes('open')) {
-    // Fetch stats and lineups
-    await postMatchStats(ctx, chatId);
-  }
-});
-
-// Paid Post Deletion After Deadline
-cron.schedule('*/1 * * * *', async () => {
-  const now = Date.now();
-
-  for (const [postId, postTime] of Object.entries(activePaidMessages)) {
-    if (now - postTime > 35 * 60 * 1000) { // 35 mins timeout
-      try {
-        await bot.telegram.deleteMessage(process.env.CHANNEL_ID, postId);
-        delete activePaidMessages[postId];
-        console.log(`Deleted paid post ${postId}`);
-      } catch (error) {
-        console.error(`Failed to delete message ${postId}:`, error.message);
-      }
-    }
-  }
-}, {
-  timezone: process.env.TIMEZONE
-});
-
-// Fetch SofaScore stats and lineups
-async function postMatchStats(ctx, chatId) {
   try {
-    const response = await axios.get(process.env.SOFASCORE_API_URL);
-    const matches = response.data.events || [];
+    if (text.includes('Rpy') || text.includes('rpy')) {
+      console.log('Paid Team Detected');
 
-    if (matches.length > 0) {
-      for (const match of matches) {
-        const home = match.homeTeam.name;
-        const away = match.awayTeam.name;
-        const time = new Date(match.startTimestamp * 1000).toLocaleTimeString('en-IN', { timeZone: process.env.TIMEZONE });
+      // Paid Team Detected
+      paidMessageIds.push(post.message_id);
+      startMotivating(ctx, post.message_id);
 
-        const statsMessage = `⚽ Upcoming Match: ${home} vs ${away}\n🕒 Time: ${time}\n🔥 Stay tuned for updates!`;
-        await ctx.telegram.sendMessage(chatId, statsMessage);
+    } else if (text.toLowerCase().includes('ready') || text.toLowerCase().includes('open')) {
+      console.log('Open Team Detected');
 
-        if (match.lineups && match.lineups.home && match.lineups.away) {
-          const lineupMessage = `✅ Confirmed Lineups:\n\n${home}:\n${match.lineups.home.players.map(p => p.player.name).join(', ')}\n\n${away}:\n${match.lineups.away.players.map(p => p.player.name).join(', ')}`;
-          await ctx.telegram.sendMessage(chatId, lineupMessage);
-        }
-      }
+      // Open Team Detected
+      await sendOpenTeamStats(ctx);
     }
   } catch (error) {
-    console.error('Error fetching SofaScore data:', error.message);
+    console.error('Error handling channel post:', error.message);
+  }
+});
+
+// --- Motivating After Paid Post ---
+function startMotivating(ctx, messageId) {
+  const interval = setInterval(async () => {
+    try {
+      await ctx.telegram.sendMessage(MAIN_CHANNEL_ID, randomBoxedMotivation());
+    } catch (err) {
+      console.error('Motivation message error:', err.message);
+    }
+  }, MOTIVATION_INTERVAL_MINUTES * 60 * 1000);
+
+  motivationIntervals[messageId] = interval;
+
+  // Stop after 35 minutes
+  setTimeout(() => {
+    clearInterval(interval);
+    delete motivationIntervals[messageId];
+  }, 35 * 60 * 1000);
+}
+
+// --- Format Boxed Motivation ---
+function randomBoxedMotivation() {
+  const quote = motivationQuotes[Math.floor(Math.random() * motivationQuotes.length)];
+  return `╔══════════╗\n${quote}\n╚══════════╝`;
+}
+
+// --- Send Open Team Stats + Lineups ---
+async function sendOpenTeamStats(ctx) {
+  try {
+    const fixtureData = await getFixtureStatsFromSofascore();
+    if (fixtureData) {
+      const statsMessage = `
+⚽ Match: ${fixtureData.home} vs ${fixtureData.away}
+⏰ Start Time: ${fixtureData.startTime}
+⭐ Prediction: ${fixtureData.prediction}
+✅ Lineups: Available!
+`;
+
+      await ctx.telegram.sendMessage(MAIN_CHANNEL_ID, statsMessage);
+    }
+  } catch (err) {
+    console.error('Error fetching open team stats:', err.message);
   }
 }
 
+// --- Get Fixture Stats from Sofascore ---
+async function getFixtureStatsFromSofascore() {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const response = await axios.get(`https://api.sofascore.com/api/v1/sport/football/events/live`);
+    const events = response.data.events;
+
+    for (const event of events) {
+      if (event.startTimestamp > now && event.startTimestamp - now < 3600) {
+        return {
+          home: event.homeTeam.name,
+          away: event.awayTeam.name,
+          startTime: new Date(event.startTimestamp * 1000).toLocaleTimeString('en-IN', { timeZone: TIMEZONE }),
+          prediction: "Tight Contest",  // Static prediction (can upgrade later)
+        };
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.error('Error fetching from Sofascore:', err.message);
+    return null;
+  }
+}
+
+// --- Start Bot ---
 bot.launch();
-console.log('HazaaPrime AI Bot is running!');
+console.log('HazaaPrime AI Bot is Running...');
