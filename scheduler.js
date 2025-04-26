@@ -1,93 +1,101 @@
-import { getMatchStats, getLineupsFromSofascore } from './sofascore.js';
+import { getRandomMotivation } from './motivator.js';
+import { getLiveFootballMatches, getMatchLineup } from './sofascore.js';
+import schedule from 'node-schedule';
+import dotenv from 'dotenv';
 
-// Function to motivate every 5 minutes
-export const watchPaidPosts = (bot, chatId, messageId) => {
-    const interval = setInterval(async () => {
-        try {
-            await bot.telegram.sendMessage(chatId, `
-🧠 Stay Focused Champion!
-✅ Unlock your winning team before deadline!
-🔥 We are making history today!
-            `);
-        } catch (err) {
-            console.error('Error sending motivation:', err);
-        }
-    }, 5 * 60 * 1000);
+dotenv.config();
 
-    // Stop after 35 minutes
-    setTimeout(() => {
-        clearInterval(interval);
-    }, 35 * 60 * 1000);
-};
+let motivationTimers = {};
+let monitoredMessages = {};
 
-// Function to post stats for open teams
-export const watchFreePosts = async (bot, chatId, messageId, postText) => {
+export function startSchedulers(bot) {
+  
+  bot.on('channel_post', async (ctx) => {
     try {
-        const matchName = extractMatchName(postText);
+      const message = ctx.update.channel_post;
+      const text = message.text || '';
+      const caption = message.caption || '';
 
-        if (!matchName) return;
+      const combinedText = `${text} ${caption}`;
 
-        const stats = await getMatchStats(matchName);
-        if (stats) {
-            await bot.telegram.sendMessage(chatId, `
-📈 Match Insights for ${matchName} 📈
-Possession: ${stats.possession}%
-Shots: ${stats.shots}
-Attack: ${stats.attacks}
-Defense: ${stats.defense}
+      // Detect Paid Post
+      if (combinedText.includes('rpy') || combinedText.includes('Rpy')) {
+        startMotivation(bot, message.chat.id, message.message_id);
+      }
 
-Lineup and Strategy incoming...
-            `);
-
-            // Start looking for lineups
-            searchLineup(bot, chatId, matchName);
-        }
+      // Detect Open Post
+      else if (combinedText.toLowerCase().includes('ready') || combinedText.toLowerCase().includes('open')) {
+        postOpenTeamStats(bot, message.chat.id);
+      }
     } catch (err) {
-        console.error('Error posting stats:', err);
+      console.error('Error handling channel post:', err.message);
     }
-};
+  });
 
-// Function to search and post lineups before match
-const searchLineup = async (bot, chatId, matchName) => {
-    const interval = setInterval(async () => {
-        try {
-            const lineup = await getLineupsFromSofascore(matchName);
-            if (lineup) {
-                await bot.telegram.sendMessage(chatId, `
-✅ Confirmed Lineups for ${matchName} ✅
+  // Morning Motivation 4:30 AM
+  schedule.scheduleJob(process.env.MORNING_MOTIVATION_TIME.split(":").map(Number), async () => {
+    try {
+      const matches = await getLiveFootballMatches();
+      for (const match of matches) {
+        const chatId = '@haazaprime'; // Main channel (modify if needed)
+        const motivationText = getRandomMotivation();
+        await bot.telegram.sendMessage(chatId, motivationText);
+      }
+    } catch (error) {
+      console.error('Error sending morning motivation:', error.message);
+    }
+  });
 
-${lineup}
+  // Lineup Checker (Every 1 minute)
+  setInterval(async () => {
+    try {
+      const matches = await getLiveFootballMatches();
+      const currentTime = Date.now();
+      for (const match of matches) {
+        const startTimestamp = match.startTimestamp * 1000;
+        const diffMinutes = (startTimestamp - currentTime) / 60000;
 
-Get ready to play smart!
-                `);
-                clearInterval(interval); // stop after posting
-            }
-        } catch (err) {
-            console.error('Lineup search error:', err);
+        if (diffMinutes <= 30 && diffMinutes >= 0) {
+          const lineup = await getMatchLineup(match.id);
+          if (lineup && lineup.home && lineup.away) {
+            const lineupText = `✅ **Official Lineups Out!**\n\n🏟️ ${match.homeTeam.name} vs ${match.awayTeam.name}\n\nCheck and update your fantasy picks now!`;
+            await bot.telegram.sendMessage('@haazaprime', lineupText, { parse_mode: 'Markdown' });
+          }
         }
-    }, 60 * 1000); // check every 1 minute
-};
+      }
+    } catch (error) {
+      console.error('Error checking lineups:', error.message);
+    }
+  }, 60000);
+}
 
-// 4:30AM Morning Message
-export const scheduleMorningMotivation = (bot) => {
-    setInterval(async () => {
-        const now = new Date();
-        if (now.getHours() === 4 && now.getMinutes() === 30) {
-            const messages = [
-                "☀️ Good Morning Champion! A New Day to Win Big!",
-                "⚽ Let's crush today's matches with the best teams!",
-                "🌟 Trust the Process. Trust HazaaPrime!"
-            ];
-            const randomMessage = messages[Math.floor(Math.random() * messages.length)];
-            const chatId = '@haazaprime'; // Main channel or later you can dynamic if needed
+function startMotivation(bot, chatId, messageId) {
+  if (motivationTimers[messageId]) return; // Already started
 
-            await bot.telegram.sendMessage(chatId, randomMessage);
-        }
-    }, 60 * 1000); // check every minute
-};
+  let count = 0;
+  const timer = setInterval(async () => {
+    if (count >= 7) { // 5 min * 7 = 35 min approx
+      clearInterval(timer);
+      delete motivationTimers[messageId];
+    } else {
+      const motivationText = getRandomMotivation();
+      await bot.telegram.sendMessage(chatId, motivationText);
+      count++;
+    }
+  }, 300000); // every 5 minutes
 
-const extractMatchName = (text) => {
-    const matchRegex = /([A-Za-z]+ vs [A-Za-z]+)/;
-    const match = text.match(matchRegex);
-    return match ? match[1] : null;
-};
+  motivationTimers[messageId] = timer;
+}
+
+async function postOpenTeamStats(bot, chatId) {
+  try {
+    const matches = await getLiveFootballMatches();
+    if (matches.length > 0) {
+      const match = matches[0];
+      const statsText = `⚽ **Today's Big Match:**\n\n${match.homeTeam.name} vs ${match.awayTeam.name}\n\nDon't miss to pick your legends!`;
+      await bot.telegram.sendMessage(chatId, statsText, { parse_mode: 'Markdown' });
+    }
+  } catch (error) {
+    console.error('Error posting open team stats:', error.message);
+  }
+}
